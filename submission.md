@@ -319,3 +319,14 @@ All 3 tests in `tests/test_playlists.py` pass:
 - `test_rating_notification_not_sent_to_self` — self-rating produces no notification
 - `test_rating_returns_rating_object` — the Rating instance is still returned correctly
 - `test_updating_rating_does_not_duplicate_notification` — rating the same song twice fires two notifications (one per call), not one or zero
+
+
+![alt text](image.png)
+
+---
+
+## Commit History
+
+The screenshot below shows `git log --oneline` on the `bugfix/mixtape` branch. Each bug fix has its own separate commit with a `fix:` prefix. The five fix commits correspond to Issues #1, #2, #3, #4, and #5 respectively. Documentation commits (`docs:`) are separate from the fix commits and do not bundle any code changes.
+
+![git log --oneline showing separate fix commits for each bug](image.png)
