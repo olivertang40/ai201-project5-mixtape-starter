@@ -2,7 +2,7 @@
 
 ## AI Tool Disclosure
 
-I used Kiro (an AI-powered IDE) throughout this project for codebase orientation and debugging. Specifically:
+I used Claude (an AI assistant) throughout this project for codebase orientation and debugging. Specifically:
 - Asked it to explain each service file's responsibility and trace call chains
 - Used it to walk through the execution path from route → service for each bug
 - Verified all root cause analysis independently by reading the code myself before confirming any fix
@@ -76,60 +76,99 @@ Every route delegates immediately to a service. Routes handle: JSON parsing, req
 
 ## Bug Fixes
 
+---
+
 ### Issue #1 — Listening streak resets on Sundays
 
-**File:** `services/streak_service.py`
+**1. How I reproduced it:**
+The README listed this as a Sunday-specific bug. I opened `tests/test_streaks.py` and ran the existing test `test_streak_increments_on_sunday`, which creates a Saturday datetime (`2024-06-15`) and a Sunday datetime (`2024-06-16`), calls `update_listening_streak()` twice, and asserts the streak reaches 2. The test failed — streak was 1 after the Sunday call, confirming the bug was real and reproducible.
 
-**How I reproduced it:**
-Called `update_listening_streak()` directly in a test with a Saturday datetime followed by a Sunday datetime. The streak reset to 1 instead of incrementing to 2. The test `test_streak_increments_on_sunday` in `tests/test_streaks.py` confirmed the failure.
+**2. How I found the root cause:**
+The README pointed to `streak_service.py`. I traced the call chain: `POST /songs/<id>/listen` → `routes/songs.py :: listen()` → `streak_service.record_listening_event()` → `streak_service.update_listening_streak()`. I read `update_listening_streak()` line by line. The three branches are: same day (no change), consecutive day (increment), anything else (reset). I focused on the consecutive-day branch:
 
-**Root Cause Analysis:**
+```python
+elif days_since_last == 1 and today.weekday() != 6:
+```
 
-| Field | Detail |
-|-------|--------|
-| **What was wrong** | The streak increment condition included an extra check `today.weekday() != 6`, which prevented incrementing on Sundays |
-| **Why it was wrong** | `weekday() == 6` is Sunday in Python. The condition `days_since_last == 1 and today.weekday() != 6` means "consecutive day AND not Sunday" — so a valid Saturday→Sunday streak always fell through to the `else` branch and reset to 1 |
-| **Where the bug was** | `streak_service.py`, `update_listening_streak()`, the `elif` branch |
-| **How I fixed it** | Removed `and today.weekday() != 6` — the only condition needed to increment is `days_since_last == 1` |
-| **What the fix looks like** | `elif days_since_last == 1:` (was: `elif days_since_last == 1 and today.weekday() != 6:`) |
+I asked Claude: "what does Python's `weekday()` return for each day of the week?" It confirmed Sunday = 6. That made the bug immediately clear — the condition requires BOTH consecutive AND not-Sunday, so Sunday is always excluded from incrementing regardless of whether the previous day was Saturday.
+
+**3. Root cause:**
+`update_listening_streak()` in `streak_service.py` has an extra guard `today.weekday() != 6` on the streak-increment branch. Python's `datetime.weekday()` returns 6 for Sunday. This means the condition `days_since_last == 1 and today.weekday() != 6` evaluates to `False` every Sunday — even when the user listened on Saturday. Execution falls through to the `else` branch and resets the streak to 1. The business rule has no concept of "Sunday doesn't count" — this condition was an incorrect addition with no valid purpose.
+
+**4. The fix and side-effect check:**
+Removed `and today.weekday() != 6` from the `elif` branch. The only condition for incrementing should be `days_since_last == 1`.
+
+```python
+# Before
+elif days_since_last == 1 and today.weekday() != 6:
+
+# After
+elif days_since_last == 1:
+```
+
+After fixing, I ran the full `tests/test_streaks.py` suite. All 5 tests pass, including the same-day no-change test and the skipped-day reset test, confirming the fix didn't break the other streak boundary conditions.
 
 ---
 
 ### Issue #4 — No notification when a friend rates your song
 
-**File:** `services/notification_service.py`
+**1. How I reproduced it:**
+The issue description said users receive a notification when a friend adds their song to a playlist, but not when a friend rates it. I wrote a test in `tests/test_notifications.py`: created a sharer user, a rater user, and a song owned by the sharer; called `rate_song(rater_id, song_id, 5)`; then called `get_notifications(sharer_id)`. The result was an empty list — no notification created. This confirmed the bug before touching any code.
 
-**How I reproduced it:**
-Called `rate_song()` with a rater user ID and a song shared by a different user, then called `get_notifications()` for the sharer. The notification list was empty. The test `test_rating_creates_notification_for_sharer` in `tests/test_notifications.py` confirmed the failure.
+**2. How I found the root cause:**
+Traced the call chain: `POST /songs/<id>/rate` → `routes/songs.py :: rate()` → `notification_service.rate_song()`. I read `rate_song()` end to end. It validates the score, fetches the song and user, creates or updates a `Rating` record, commits, and returns the rating. There is no call to `create_notification()` anywhere in the function. I then read `add_to_playlist()` in the same file — it does the same DB work and then calls `create_notification()` for `song.shared_by`. The two functions are architecturally parallel, but `rate_song()` is missing its notification step. The function lives in `notification_service.py` — the fact that it's named and placed there implies it was always intended to send a notification.
 
-**Root Cause Analysis:**
+**3. Root cause:**
+`rate_song()` in `notification_service.py` handles the rating persistence correctly but never calls `create_notification()`. The parallel function `add_to_playlist()` in the same file does call `create_notification()` after its DB work. This is an architectural omission — the notification step was simply never added to `rate_song()`. No logic is wrong; the step is entirely absent.
 
-| Field | Detail |
-|-------|--------|
-| **What was wrong** | `rate_song()` saved the rating but never called `create_notification()` |
-| **Why it was wrong** | The function is in `notification_service.py` alongside `add_to_playlist()`, which does call `create_notification()` after its operation. `rate_song()` was missing the parallel notification step — an architectural omission, not a typo |
-| **Where the bug was** | `notification_service.py`, `rate_song()`, after `db.session.commit()` |
-| **How I fixed it** | Added a `create_notification()` call for `song.shared_by` with type `"song_rated"`, guarded by `if song.shared_by != user_id` to avoid self-notifications |
-| **Regression test** | `tests/test_notifications.py` — covers notification sent, no self-notification, rating still returned correctly, and update-rating behavior |
+**4. The fix and side-effect check:**
+Added a `create_notification()` call after `db.session.commit()`, mirroring the pattern in `add_to_playlist()`. Added a self-notification guard (`if song.shared_by != user_id`) so a user rating their own song doesn't generate a notification.
+
+```python
+# Added after db.session.commit()
+if song.shared_by != user_id:
+    create_notification(
+        user_id=song.shared_by,
+        notification_type="song_rated",
+        body=f"{rater.username} rated your song '{song.title}'.",
+    )
+```
+
+After fixing, I verified: (a) `rate_song()` still returns the correct `Rating` object, (b) updating an existing rating still works, (c) self-rating produces no notification. All 4 tests in `tests/test_notifications.py` pass. The `add_to_playlist()` path was not touched and its tests still pass.
+
+**Regression test:** `tests/test_notifications.py`
 
 ---
 
 ### Issue #5 — Last song in a playlist never shows up
 
-**File:** `services/playlist_service.py`
+**1. How I reproduced it:**
+The issue description said the last song in any playlist is missing from the response. I ran `tests/test_playlists.py`. The test `test_playlist_returns_all_songs` creates a 5-song playlist and asserts `len(songs) == 5`. It failed with `assert 4 == 5`. The test `test_playlist_returns_songs_in_order` also failed — the returned list stopped at Track 4. This confirmed the bug: exactly one song is always missing, and it's always the last one.
 
-**How I reproduced it:**
-Created a playlist with 5 songs using the test fixture in `tests/test_playlists.py` and called `get_playlist_songs()`. It returned 4 songs. Track 5 was always missing regardless of what song was last. The test `test_playlist_returns_all_songs` confirmed the failure.
+**2. How I found the root cause:**
+Traced the call chain: `GET /playlists/<id>/songs` → `routes/playlists.py :: get_songs()` → `playlist_service.get_playlist_songs()`. I read `get_playlist_songs()`. The SQL query joins `playlist_entries`, filters by playlist ID, and orders by `position` ascending — all correct. Then I read the return statement:
 
-**Root Cause Analysis:**
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
 
-| Field | Detail |
-|-------|--------|
-| **What was wrong** | The return statement used `songs[:-1]` instead of `songs` |
-| **Why it was wrong** | `songs[:-1]` is Python slice notation for "all elements except the last one" — so the final song in the ordered list was always dropped from the response |
-| **Where the bug was** | `playlist_service.py`, `get_playlist_songs()`, the return statement |
-| **How I fixed it** | Changed `return [song.to_dict() for song in songs[:-1]]` to `return [song.to_dict() for song in songs]` |
-| **What the fix looks like** | One character change: removed `[:-1]` from the list comprehension |
+`songs[:-1]` is Python slice notation for "all elements except the last." The query was fetching all 5 songs correctly; the slice was discarding the last one before returning. No ambiguity — this is the exact line causing the symptom.
+
+**3. Root cause:**
+`get_playlist_songs()` in `playlist_service.py` applies `[:-1]` slice to the query results before returning them. In Python, `list[:-1]` returns all elements up to but not including the last. The SQL query retrieves all songs correctly, but the return statement unconditionally strips the final entry. This affects every playlist regardless of size — a 1-song playlist returns empty, a 5-song playlist returns 4.
+
+**4. The fix and side-effect check:**
+Removed `[:-1]` from the list comprehension.
+
+```python
+# Before
+return [song.to_dict() for song in songs[:-1]]
+
+# After
+return [song.to_dict() for song in songs]
+```
+
+After fixing, all 3 tests in `tests/test_playlists.py` pass, including `test_empty_playlist_returns_empty_list` (confirms empty playlists still return `[]` correctly, not an error).
 
 ---
 
