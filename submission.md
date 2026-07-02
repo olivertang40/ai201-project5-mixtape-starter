@@ -320,9 +320,6 @@ All 3 tests in `tests/test_playlists.py` pass:
 - `test_rating_returns_rating_object` — the Rating instance is still returned correctly
 - `test_updating_rating_does_not_duplicate_notification` — rating the same song twice fires two notifications (one per call), not one or zero
 
-
-![alt text](image.png)
-
 ---
 
 ## Commit History
