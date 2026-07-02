@@ -26,7 +26,9 @@ ai201-project5-mixtape-starter/
 ├── tests/
 │   ├── test_streaks.py
 │   ├── test_search.py
-│   └── test_playlists.py
+│   ├── test_playlists.py
+│   ├── test_notifications.py
+│   └── test_feed.py
 ├── seed_data.py                # Populates DB with test data
 ├── requirements.txt
 └── .gitignore
@@ -83,13 +85,13 @@ pytest tests/
 
 ## The Five Open Issues
 
-| # | Title | Affected service |
-|---|-------|-----------------|
-| 1 | My listening streak keeps resetting | `streak_service.py` |
-| 2 | Friends Listening Now shows people from yesterday | `feed_service.py` |
-| 3 | The same song keeps showing up twice in search | `search_service.py` |
-| 4 | I got notified when a friend added my song to a playlist but not when they rated it | `notification_service.py` |
-| 5 | The last song in a playlist never shows up | `playlist_service.py` |
+| # | Title | Affected service | Status |
+|---|-------|-----------------|--------|
+| 1 | My listening streak keeps resetting | `streak_service.py` | ✅ Fixed |
+| 2 | Friends Listening Now shows people from yesterday | `feed_service.py` | ✅ Fixed |
+| 3 | The same song keeps showing up twice in search | `search_service.py` | ✅ Fixed |
+| 4 | I got notified when a friend added my song to a playlist but not when they rated it | `notification_service.py` | ✅ Fixed |
+| 5 | The last song in a playlist never shows up | `playlist_service.py` | ✅ Fixed |
 
 Full issue descriptions are in the **Project 5 brief**. Read them carefully before opening any service file.
 

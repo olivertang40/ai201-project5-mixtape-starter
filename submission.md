@@ -110,6 +110,89 @@ After fixing, I ran the full `tests/test_streaks.py` suite. All 5 tests pass, in
 
 ---
 
+### Issue #2 — Friends Listening Now shows people from yesterday
+
+**1. How I reproduced it:**
+The issue says users see friends who listened yesterday, not just today. I wrote a test in `tests/test_feed.py`: created a user with a friend, inserted a `ListeningEvent` with `listened_at` set to yesterday (current time minus 24 hours), then called `get_friends_listening_now()`. The friend appeared in the result even though they listened yesterday. The test `test_yesterday_event_does_not_appear_in_feed` confirmed the failure before any code was changed.
+
+**2. How I found the root cause:**
+Traced the call chain: `GET /feed/<user_id>/listening-now` → `routes/feed.py :: listening_now()` → `feed_service.get_friends_listening_now()`. The route does nothing except call the service. I read `get_friends_listening_now()` and immediately spotted:
+
+```python
+RECENT_THRESHOLD = timedelta(hours=24)
+cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD
+```
+
+The cutoff is "now minus 24 hours" — a rolling window. On Wednesday at 2pm, the cutoff is Tuesday at 2pm, so Tuesday afternoon events are included. The feature is called "Listening **Now**" but the window extends well into yesterday.
+
+**3. Root cause:**
+`get_friends_listening_now()` in `feed_service.py` uses `timedelta(hours=24)` as its recency threshold, making the cutoff a rolling 24-hour window rather than the start of today. A 24-hour window is not the same as "today" — any event from the same time yesterday would pass the filter. The fix is to use today's UTC midnight as the cutoff, so only events from the current calendar day are included.
+
+**4. The fix and side-effect check:**
+Replaced the rolling `timedelta(hours=24)` window with a cutoff at today's UTC midnight:
+
+```python
+# Before
+RECENT_THRESHOLD = timedelta(hours=24)
+cutoff = datetime.now(timezone.utc) - RECENT_THRESHOLD
+
+# After
+now = datetime.now(timezone.utc)
+cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+```
+
+After fixing, all 4 tests in `tests/test_feed.py` pass. The `get_activity_feed()` function was not touched — it intentionally has no recency filter and returns the most recent N events regardless of date.
+
+**Regression test:** `tests/test_feed.py` — `test_yesterday_event_does_not_appear_in_feed`
+
+---
+
+### Issue #3 — The same song keeps showing up twice in search
+
+**1. How I reproduced it:**
+The issue says duplicate songs appear in search results. I ran `tests/test_search.py`. The test `test_search_no_duplicates_multi_tag_song` creates a song with 3 tags and searches for it — asserting it appears exactly once. It failed with the song appearing 3 times. `test_search_no_duplicates_single_tag_song` passed (1 tag = no duplicate). This confirmed the bug is conditional on how many tags a song has.
+
+**2. How I found the root cause:**
+Traced the call chain: `GET /songs/search?q=<query>` → `routes/songs.py :: search()` → `search_service.search_songs()`. I read `search_songs()`:
+
+```python
+results = (
+    db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(...)
+    .all()
+)
+```
+
+The query does an `outerjoin` with `song_tags`. A JOIN multiplies rows — for each matching row in `song_tags`, the song appears once in the result. A song with 3 tags has 3 rows in `song_tags`, so the join produces 3 copies of that song. A song with no tags gets one NULL row from the outer join, so it appears once. I then checked `Song.to_dict()` in `models.py` and confirmed it already loads tags via `self.tags` (a SQLAlchemy relationship with `lazy="subquery"`). The join in the query is entirely unnecessary.
+
+**3. Root cause:**
+`search_songs()` in `search_service.py` performs an `outerjoin` between `Song` and `song_tags`. SQL joins multiply result rows — one row per matching join entry. A song with N tags produces N result rows, causing it to appear N times in the returned list. The join serves no purpose: `Song.to_dict()` already retrieves tags through the SQLAlchemy `Song.tags` relationship, which is loaded automatically. The join was either a leftover from an earlier approach or added by mistake.
+
+**4. The fix and side-effect check:**
+Removed the `.outerjoin(song_tags, Song.id == song_tags.c.song_id)` line entirely.
+
+```python
+# Before
+results = (
+    db.session.query(Song)
+    .outerjoin(song_tags, Song.id == song_tags.c.song_id)
+    .filter(...)
+    .all()
+)
+
+# After
+results = (
+    db.session.query(Song)
+    .filter(...)
+    .all()
+)
+```
+
+After fixing, all 5 tests in `tests/test_search.py` pass. Songs with 0, 1, and 3 tags all return exactly once. Tags are still correctly included in each song's response via the relationship — confirmed by `test_search_returns_matching_songs` which checks the returned song data.
+
+---
+
 ### Issue #4 — No notification when a friend rates your song
 
 **1. How I reproduced it:**
@@ -174,9 +257,14 @@ After fixing, all 3 tests in `tests/test_playlists.py` pass, including `test_emp
 
 ## Regression Tests
 
-Written for **Issue #4** in `tests/test_notifications.py`:
+**Issue #2** — `tests/test_feed.py`:
+- `test_yesterday_event_does_not_appear_in_feed` — core regression: yesterday's listening event must not appear in Friends Listening Now
+- `test_today_event_appears_in_feed` — today's event should appear
+- `test_only_today_shown_when_both_exist` — when both exist, only today's is returned
+- `test_no_friends_returns_empty` — no friends returns empty list
 
-- `test_rating_creates_notification_for_sharer` — core regression: confirms a notification is created for the sharer when someone else rates their song
-- `test_rating_notification_not_sent_to_self` — confirms no notification when a user rates their own song
-- `test_rating_returns_rating_object` — confirms the Rating object is still returned correctly after the fix
-- `test_updating_rating_does_not_duplicate_notification` — confirms behavior when updating an existing rating
+**Issue #4** — `tests/test_notifications.py`:
+- `test_rating_creates_notification_for_sharer` — core regression: notification created for sharer when someone else rates their song
+- `test_rating_notification_not_sent_to_self` — no notification when rating your own song
+- `test_rating_returns_rating_object` — Rating object still returned correctly after fix
+- `test_updating_rating_does_not_duplicate_notification` — update-rating behavior confirmed
